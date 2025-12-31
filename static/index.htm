@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Go 视频文件损坏检查工具</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f4f7f6; }
+        .container { max-width: 900px; margin: auto; background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); }
+        h1 { color: #333; border-bottom: 2px solid #007bff; padding-bottom: 10px; }
+        .controls { display: flex; gap: 20px; margin-bottom: 20px; align-items: flex-end; }
+        .controls div { flex-grow: 1; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; color: #555; }
+        input[type="text"], select { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        button { padding: 10px 15px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; transition: background-color 0.3s; }
+        button:hover:not(:disabled) { background-color: #0056b3; }
+        button:disabled { background-color: #a0c3e8; cursor: not-allowed; }
+        
+        /* 列表和日志区域 */
+        .results-section, .log-section { margin-top: 25px; padding: 15px; border: 1px solid #eee; border-radius: 4px; background-color: #fafafa; }
+        .results-section h2, .log-section h2 { margin-top: 0; color: #007bff; font-size: 1.2em; }
+        
+        /* 列表样式 */
+        #fileList { max-height: 400px; overflow-y: auto; list-style: none; padding: 0; margin: 0; }
+        #fileList li { padding: 8px; border-bottom: 1px dotted #ddd; display: flex; justify-content: space-between; align-items: center; }
+        #fileList li:last-child { border-bottom: none; }
+        .status { font-weight: bold; padding: 2px 8px; border-radius: 3px; font-size: 0.9em; }
+        .status.ok { background-color: #e6ffed; color: #10ac47; }
+        .status.broken { background-color: #ffe6e6; color: #dc3545; }
+
+        /* 日志样式 */
+        #logArea { height: 150px; overflow-y: scroll; background-color: #333; color: #f4f7f6; padding: 10px; font-size: 0.9em; border-radius: 4px; white-space: pre-wrap; }
+
+        /* 进度条 */
+        .progress-container { margin-top: 15px; background-color: #e9ecef; border-radius: 50px; height: 25px; overflow: hidden; }
+        .progress-bar { height: 100%; width: 0%; background-color: #28a745; text-align: center; color: white; line-height: 25px; transition: width 0.4s ease; font-weight: bold; }
+        #progressText { margin-top: 5px; font-size: 0.9em; color: #666; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <button id="cleardbButton" style="margin-top: 24px;float: right;background: red;">清除记录</button>
+    <button id="printdbButton" style="margin-top: 24px;margin-right: 10px;float: right;background: #007bff;">打印记录</button>
+    <!-- <button id="moveBrokenButton" style="margin-top: 24px;margin-right: 10px;float: right;background: orange;">移动损坏文件</button>
+    <button id="moveNormalButton" style="margin-top: 24px;margin-right: 10px;float: right;background: orange;">移动正常文件</button> -->
+    <h1>🎬 视频文件损坏检查</h1>
+
+    <div class="controls">
+        <div style="width: 50%;">
+            <label for="directoryPath">目标与源目录路径</label>
+            <input type="text" id="directoryPath" value="" placeholder="请输入要扫描的目录路径 (例如: C:\Videos 或 /home/user/videos)">
+        </div>
+        <div>
+            <label for="scanMode">检查方式</label>
+            <select id="scanMode">
+                <option value="quick">快速检查 (ffprobe 流信息)</option>
+                <option value="full">完整检查 (画面和黑盒检测)</option>
+            </select>
+        </div>
+        <div>
+            <label for="scanType">重复记录</label>
+            <select id="scanType">
+                <option value="skip1">跳过全部</option>
+                <option value="skip2">跳过正常</option>
+            </select>
+        </div>
+        <div>
+            <button id="startButton">开始</button>
+        </div>
+    </div>
+
+    <div class="progress-container">
+        <div id="progressBar" class="progress-bar">0%</div>
+    </div>
+    <div id="progressText">等待开始...</div>
+
+    <div class="results-section">
+        <h2>检查结果列表</h2>
+        <ul id="fileList">
+            </ul>
+    </div>
+
+    <div class="log-section">
+        <h2>执行日志</h2>
+        <pre id="logArea">等待连接后端...</pre>
+    </div>
+</div>
+
+<script>
+    const logArea = document.getElementById('logArea');
+    const fileList = document.getElementById('fileList');
+    const startButton = document.getElementById('startButton');
+    const printdbButton = document.getElementById('printdbButton');
+    const cleardbButton = document.getElementById('cleardbButton');
+    const moveBrokenButton = document.getElementById('moveBrokenButton');
+    const moveNormalButton = document.getElementById('moveNormalButton');
+    const directoryPath = document.getElementById('directoryPath');
+    const scanMode = document.getElementById('scanMode');
+    const scanType = document.getElementById('scanType');
+    const progressBar = document.getElementById('progressBar');
+    const progressText = document.getElementById('progressText');
+    
+    document.getElementById('directoryPath').value = '{{dir_path}}';
+    document.getElementById('scanMode').value = '{{scanMode}}';
+    document.getElementById('scanType').value = '{{scanType}}';
+    
+    // WebSocket 连接建立
+    const ws = new WebSocket("ws://" + window.location.host + "/ws");
+    
+    let isScanning = false;
+
+    ws.onopen = () => {
+        logMessage("系统", "✅ 已连接到 Go 后端服务。", true);
+        startButton.disabled = false;
+        startButton.textContent = "开始";
+    };
+    
+    ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        
+        switch (msg.type) {
+            case "log":
+                logMessage("后端", msg.content, true);
+                break;
+            case "progress":
+                updateProgress(msg.current, msg.total, msg.content);
+                if (msg.current === msg.total && msg.total !== 0) {
+                    isScanning = false;
+                    startButton.disabled = false;
+                    startButton.textContent = "重新开始";
+                }else{
+                    isScanning = true;
+                    startButton.disabled = true;
+                    startButton.textContent = "正在检查";
+                }
+                break;
+            case "result":
+                addResultToList(msg.path, msg.status);
+                break;
+        }
+    };
+
+    ws.onclose = () => {
+        logMessage("系统", "⚠️ 连接已断开，请重启 Go 后端程序。", true);
+        startButton.disabled = true;
+        isScanning = false;
+    };
+
+    ws.onerror = (error) => {
+        logMessage("系统", "❌ WebSocket 错误: " + error.message, true);
+    };
+
+    // --- DOM 操作函数 ---
+
+    function logMessage(source, content, autoScroll = false) {
+        const time = new Date().toLocaleTimeString();
+        logArea.textContent += `[${time}][${source}] ${content}\n`;
+        if (autoScroll) {
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+    }
+    
+    function updateProgress(current, total, text) {
+        if (total === 0) {
+            progressBar.style.width = '0%';
+            progressBar.textContent = '0%';
+            progressText.textContent = "等待开始...";
+            return;
+        }
+        
+        const percent = Math.floor((current / total) * 100);
+        progressBar.style.width = percent + '%';
+        progressBar.textContent = percent + '%';
+        progressText.textContent = `${text} (已检查 ${current} / 共 ${total} 个文件)`;
+    }
+
+    function addResultToList(path, status) {
+        // 创建新的列表项
+        const li = document.createElement('li');
+        
+        // 提取文件名
+        //const filename = path.split(/[\/\\]/).pop();
+        const filename = path;
+
+        // 状态 Span
+        const statusSpan = document.createElement('span');
+        statusSpan.className = `status ${status}`;
+        switch (status) {
+            case 'ok':
+                statusSpan.textContent =  '正常'
+                break;
+            case 'broken':
+                statusSpan.textContent =  '损坏'
+                break;
+            case 'skipped':
+                statusSpan.textContent =  '跳过'
+                break;
+            default:
+                break;
+        }
+
+        // 文件路径/名
+        const pathSpan = document.createElement('span');
+        pathSpan.textContent = filename;
+        pathSpan.title = path; // 完整路径作为提示
+
+        li.appendChild(pathSpan);
+        li.appendChild(statusSpan);
+        
+        // 将新结果添加到列表顶部
+        if (status != "skipped"){fileList.insertBefore(li, fileList.firstChild);}
+    }
+
+    // --- 事件监听器 ---
+
+    startButton.addEventListener('click', () => {
+        if (isScanning) return;
+        
+        const dir = directoryPath.value.trim();
+        if (!dir) {
+            alert("请输入一个有效的目录路径！");
+            return;
+        }
+
+        // 状态切换和清理
+        isScanning = true;
+        startButton.disabled = true;
+        startButton.textContent = "正在检查";
+        fileList.innerHTML = ''; // 清空结果列表
+        logArea.textContent = ''; // 清空日志
+        logMessage("系统", `收到请求，开始检查目录: ${dir}`, true);
+        updateProgress(0, 0, ""); // 重置进度条
+
+        // 发送请求给后端
+        const request = {
+            directory: dir,
+            scanMode: scanMode.value,
+            scanType: scanType.value
+        };
+        ws.send(JSON.stringify(request));
+    });
+
+    printdbButton.addEventListener('click', () => {
+        if (isScanning) return;
+        
+        const dir = directoryPath.value.trim();
+        if (!dir) {
+            alert("请输入一个有效的目录路径！");
+            return;
+        }
+
+        fileList.innerHTML = ''; // 清空结果列表
+        logArea.textContent = ''; // 清空日志
+        logMessage("系统", `开始打印验证记录: ${dir}`, true);
+        updateProgress(0, 0, ""); // 重置进度条
+
+        // 发送请求给后端
+        const request = {
+            directory: dir,
+            scanMode: "printdb",
+            scanType: scanType.value
+        };
+        ws.send(JSON.stringify(request));
+    });
+    cleardbButton.addEventListener('click', () => {
+        if (isScanning) return;
+        
+        const dir = directoryPath.value.trim();
+        if (!dir) {
+            alert("请输入一个有效的目录路径！");
+            return;
+        }
+
+        // 状态切换和清理
+        logMessage("系统", `收到请求，开始清理记录`, true);
+
+        // 发送请求给后端
+        const request = {
+            directory: dir,
+            scanMode: "cleardb",
+            scanType: ""
+        };
+        ws.send(JSON.stringify(request));
+    });
+    if (moveBrokenButton != null){
+        moveBrokenButton.addEventListener('click', () => {
+            if (isScanning) return;
+            
+            const dir = directoryPath.value.trim();
+            if (!dir) {
+                alert("请输入一个有效的目录路径！");
+                return;
+            }
+
+            // 状态切换和清理
+            logMessage("系统", `收到请求，开始移动损坏文件`, true);
+
+            // 发送请求给后端
+            const request = {
+                directory: dir,
+                scanMode: "movebroken",
+                scanType: ""
+            };
+            ws.send(JSON.stringify(request));
+        });
+    }
+    if (moveNormalButton != null){
+        moveNormalButton.addEventListener('click', () => {
+            if (isScanning) return;
+            
+            const dir = directoryPath.value.trim();
+            if (!dir) {
+                alert("请输入一个有效的目录路径！");
+                return;
+            }
+
+            // 状态切换和清理
+            logMessage("系统", `收到请求，开始移动正常文件`, true);
+
+            // 发送请求给后端
+            const request = {
+                directory: dir,
+                scanMode: "movenormal",
+                scanType: ""
+            };
+            ws.send(JSON.stringify(request));
+        });
+    }
+</script>
+</body>
+</html>
