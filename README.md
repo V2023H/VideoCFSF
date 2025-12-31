@@ -1,4 +1,5 @@
 # VideoCFSF
 视频文件损坏检查,当你是视频被误删或者损坏后，恢复出来的视频文件可能碎片化，这个功能可以批量检测出来被损坏的文件,适合大量文件放在后台慢慢筛选。<br>
+支持windows和linux，arm64和amd64<br>
 支持格式：".mp4", ".mov", ".avi", ".mkv",".wmv", ".flv", ".webm"<br>
 注意：依赖ffmpeg，ffprobe，自行加入$path
